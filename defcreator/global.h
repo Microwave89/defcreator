@@ -4,3 +4,5 @@
 #include <..\ndk\ntndk.h>
 #include <intrin.h>
 #include <ntstrsafe.h>
+
+int _getch(void);
