@@ -183,11 +183,12 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	return STATUS_SUCCESS;
 }
 
-NTSTATUS dumpEatEntriesToFile(PVOID pEatList, ULONGLONG listBufferSize){
+NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize){
 	OBJECT_ATTRIBUTES defFileAttr;
 	UNICODE_STRING uDefFileName;
 	IO_STATUS_BLOCK ioSb;
 
+	char szDefPreamble[] = { 'E', 'X', 'P', 'O', 'R', 'T', 'S', 0x0D, 0x0A, 0x0D, 0x0A };
 	NTSTATUS status = STATUS_DATA_NOT_ACCEPTED;
 	HANDLE hDefFile = NULL;
 	HANDLE hParentDir = NULL;
@@ -195,6 +196,14 @@ NTSTATUS dumpEatEntriesToFile(PVOID pEatList, ULONGLONG listBufferSize){
 	RtlInitUnicodeString(&uDefFileName, L"exports.def");
 	InitializeObjectAttributes(&defFileAttr, &uDefFileName, OBJ_CASE_INSENSITIVE, hParentDir, NULL);
 	status = NtCreateFile(&hDefFile, FILE_ALL_ACCESS | SYNCHRONIZE, &defFileAttr, &ioSb, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SUPERSEDE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
+	if (status)
+		return status;
+
+	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, szDefPreamble, sizeof(szDefPreamble), NULL, NULL);
+	if (status)
+		return status;
+
+	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, pEatEntryList, (ULONG)listBufferSize, NULL, NULL);
 	if (status)
 		return status;
 
@@ -206,6 +215,7 @@ void mymain(void){
 	PVOID pDllBase = NULL;
 	PVOID pListBuf = NULL;
 	ULONGLONG requiredBufSize = 0;
+	ULONGLONG entryStringLength = 0;
 	NTSTATUS status = STATUS_HANDLE_NO_LONGER_VALID;
 
 	printf_s("Welcome to .def File Creator V0.1!\n\n");
@@ -233,7 +243,9 @@ void mymain(void){
 
 	printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
 
-	dumpEatEntriesToFile(pListBuf, requiredBufSize);
+	///We don't want to write zeros into the file. The standard EOF is sufficient.
+	entryStringLength = requiredBufSize - sizeof(WCHAR);
+	dumpEatEntriesToDefFile(pListBuf, requiredBufSize);
 	fflush(stdin);
 	_getch();
 }
