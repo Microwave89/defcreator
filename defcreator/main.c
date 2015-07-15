@@ -4,7 +4,7 @@
 static WCHAR sg_szDefFile[MAXSHORT + 1];
 
 void mydie(NTSTATUS status){
-	printf_s("NTSTATUS error: 0x%lX", status);
+	printf_s("\nNTSTATUS error: 0x%lX", status);
 	fflush(stdin);
 	_getch();
 	NtTerminateProcess(INVALID_HANDLE_VALUE, status);
@@ -64,11 +64,41 @@ NTSTATUS getAndLoadDllByInput(PVOID* ppDllBase){
 	return STATUS_SUCCESS;
 }
 
+NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PVOID pListBuffer, ULONGLONG listBufferSize, PULONGLONG neededBufferSize){
+	PIMAGE_NT_HEADERS64 pPeHdr = NULL;
+	pPeHdr = (PIMAGE_NT_HEADERS64)((PUCHAR)pImageFileBase + ((PIMAGE_DOS_HEADER)pImageFileBase)->e_lfanew);
+	PIMAGE_OPTIONAL_HEADER64 pOptionalHdr = &pPeHdr->OptionalHeader;
+	///TODO: Check if image has export directory!!!!!!!!!!!!! 
+	PIMAGE_DATA_DIRECTORY pDataDirectory = pOptionalHdr->DataDirectory;
+	PIMAGE_EXPORT_DIRECTORY pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((PUCHAR)pImageFileBase + pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+	printf_s("\nImage exports %d named functions.", pExportDirectory->NumberOfNames);
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS dumpEatEntriesToFile(PVOID pEatList, ULONGLONG listBufferSize){
+	OBJECT_ATTRIBUTES defFileAttr;
+	UNICODE_STRING uDefFileName;
+	IO_STATUS_BLOCK ioSb;
+
+	NTSTATUS status = STATUS_DATA_NOT_ACCEPTED;
+	HANDLE hDefFile = NULL;
+	HANDLE hParentDir = NULL;
+	hParentDir = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
+	RtlInitUnicodeString(&uDefFileName, L"exports.def");
+	InitializeObjectAttributes(&defFileAttr, &uDefFileName, OBJ_CASE_INSENSITIVE, hParentDir, NULL);
+	status = NtCreateFile(&hDefFile, FILE_ALL_ACCESS | SYNCHRONIZE, &defFileAttr, &ioSb, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SUPERSEDE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
+	if (status)
+		return status;
+
+	NtClose(hDefFile);
+	return STATUS_SUCCESS;
+}
+
 void mymain(void){
 	PVOID pDllBase = NULL;
 	NTSTATUS status = STATUS_HANDLE_NO_LONGER_VALID;
 
-	printf_s("Welcome to export .def File Creator V0.1!\n\n");
+	printf_s("Welcome to .def File Creator V0.1!\n\n");
 	printf_s("Enter the full DLL or exe name as in the following example:\n");
 	printf_s("\"ntdll.dll\" (without quotes).\n\n");
 	printf_s("DLL must reside in \\System32 or in current directory.\n\n");
@@ -78,8 +108,10 @@ void mymain(void){
 	if (status)
 		mydie(status);
 
-	printf_s("DLL loaded successfully. Address: %p", pDllBase);
-	
+	printf_s("DLL loaded successfully. Address: %p\n", pDllBase);
+	obtainImageFileEatEntries(pDllBase, NULL, 0, NULL);
+
+	dumpEatEntriesToFile(NULL, 0);
 	fflush(stdin);
 	_getch();
 }
