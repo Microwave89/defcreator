@@ -89,7 +89,7 @@ NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG acce
 	return STATUS_INVALID_ADDRESS;
 }
 
-NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PULONGLONG pNeededBufferSize){
+NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PULONGLONG pNeededBufferSize, PUCHAR pModuleName, ULONGLONG moduleNameSize){
 	ULONGLONG nameLength = 0;
 	ULONGLONG maxReadSize = 0;
 	NTSTATUS status = STATUS_UNABLE_TO_UNLOAD_MEDIA;
@@ -102,7 +102,7 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	PUCHAR pNextName = NULL;
 	PUCHAR pListPointer = NULL;
 
-	if (!pImageFileBase || !pNeededBufferSize)
+	if (!pImageFileBase || !pNeededBufferSize || !pModuleName)
 		return STATUS_INVALID_PARAMETER;
 
 	if (!pListBuffer && *pNeededBufferSize)
@@ -150,6 +150,18 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	if (status)
 		return status;
 
+	///Is it safe to copy the module name?
+	maxReadSize = pNameRvaArray[0] - pExportDirectory->Name;
+	status = validatePePointer(pImageFileBase, (PVOID)((PUCHAR)pImageFileBase + pExportDirectory->Name), maxReadSize, FALSE);
+	if (status)
+		return status;
+
+	if (moduleNameSize < maxReadSize)
+		return STATUS_STACK_OVERFLOW;
+
+	RtlCopyMemory(pModuleName, (PUCHAR)pImageFileBase + pExportDirectory->Name, maxReadSize);
+	pModuleName[maxReadSize - 1] = 0x0;
+
 	pListPointer = pListBuffer;
 	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
 		///Will none of the obtained name RVAs evaluate to an invalid name pointer?
@@ -183,15 +195,33 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	return STATUS_SUCCESS;
 }
 
-NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize){
+NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize, PUCHAR pModuleName){
 	OBJECT_ATTRIBUTES defFileAttr;
 	UNICODE_STRING uDefFileName;
 	IO_STATUS_BLOCK ioSb;
 
-	char szDefPreamble[] = { 'E', 'X', 'P', 'O', 'R', 'T', 'S', 0x0D, 0x0A, 0x0D, 0x0A };
-	NTSTATUS status = STATUS_DATA_NOT_ACCEPTED;
+	NTSTATUS status = STATUS_CLUSTER_NETINTERFACE_EXISTS;
+	PCHAR pDefPreamble = NULL;
+	///Keep it simple. We can't allocate less than 4 kB using NtXxx funcs anyway,
+	///so just allocate 4 kB although we never will need that much.
+	ULONGLONG defPreambleSize = PAGE_SIZE;
 	HANDLE hDefFile = NULL;
 	HANDLE hParentDir = NULL;
+	///Quite some ugly hacking...
+	char szDefPreamblePart[] = { 0x0D, 0x0A, 0x0D, 0x0A, 'E', 'X', 'P', 'O', 'R', 'T', 'S', 0x0D, 0x0A };
+
+	status = NtAllocateVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, 0, &defPreambleSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	if (status)
+		return status;
+
+	status = RtlStringCbPrintfA(pDefPreamble, defPreambleSize, "LIBRARY %s%s", pModuleName, szDefPreamblePart);
+	if (status)
+		return status;
+
+	status = RtlStringCbLengthA(pDefPreamble, defPreambleSize, &defPreambleSize);
+	if (status)
+		return status;
+
 	hParentDir = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
 	RtlInitUnicodeString(&uDefFileName, L"exports.def");
 	InitializeObjectAttributes(&defFileAttr, &uDefFileName, OBJ_CASE_INSENSITIVE, hParentDir, NULL);
@@ -199,7 +229,7 @@ NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize){
 	if (status)
 		return status;
 
-	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, szDefPreamble, sizeof(szDefPreamble), NULL, NULL);
+	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, pDefPreamble, (ULONG)defPreambleSize, NULL, NULL);
 	if (status)
 		return status;
 
@@ -212,6 +242,8 @@ NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize){
 }
 
 void mymain(void){
+	///A valid module name cannot exceed the Windows path part constraints.
+	UCHAR szInternalDllName[MAX_PATH];
 	PVOID pDllBase = NULL;
 	PVOID pListBuf = NULL;
 	ULONGLONG requiredBufSize = 0;
@@ -229,7 +261,7 @@ void mymain(void){
 		mydie(status);
 
 	printf_s("DLL loaded successfully. Address: %p\n", pDllBase);
-	status = obtainImageFileEatEntries(pDllBase, NULL, &requiredBufSize);
+	status = obtainImageFileEatEntries(pDllBase, NULL, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
 	if (status != STATUS_BUFFER_TOO_SMALL)
 		mydie(status);
 
@@ -237,15 +269,16 @@ void mymain(void){
 	if (status)
 		mydie(status);
 	
-	status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize);
+	status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
 	if (status)
 		mydie(status);
 
+	printf_s("\nDLL name: %s", szInternalDllName);
 	printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
 
 	///We don't want to write zeros into the file. The standard EOF is sufficient.
 	entryStringLength = requiredBufSize - sizeof(WCHAR);
-	dumpEatEntriesToDefFile(pListBuf, requiredBufSize);
+	dumpEatEntriesToDefFile(pListBuf, requiredBufSize, szInternalDllName);
 	fflush(stdin);
 	_getch();
 }
