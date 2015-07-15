@@ -89,55 +89,76 @@ NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG acce
 	return STATUS_INVALID_ADDRESS;
 }
 
-NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, ULONGLONG listBufferSize, PULONGLONG pNeededBufferSize){
-	IMAGE_DATA_DIRECTORY dataDirectory;
-
-	ULONG nameRvaCheck = 0;
+NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PULONGLONG pNeededBufferSize){
 	ULONGLONG nameLength = 0;
 	ULONGLONG maxReadSize = 0;
 	NTSTATUS status = STATUS_UNABLE_TO_UNLOAD_MEDIA;
 	ULONGLONG exportSize = 0;
 	PIMAGE_NT_HEADERS64 pImagePeHdr = NULL;
 	PIMAGE_DATA_DIRECTORY pDataDirectory = NULL;
+	PIMAGE_EXPORT_DIRECTORY pExportDirectory = NULL;
 	PULONG pNameRvaArray = NULL;
 	PUCHAR pCurrName = NULL;
 	PUCHAR pNextName = NULL;
 	PUCHAR pListPointer = NULL;
 
-	if (!pImageFileBase || !pNeededBufferSize || !pListBuffer && listBufferSize)
+	if (!pImageFileBase || !pNeededBufferSize)
 		return STATUS_INVALID_PARAMETER;
 
+	if (!pListBuffer && *pNeededBufferSize)
+		return STATUS_INVALID_PARAMETER;
+	
 	pImagePeHdr = (PIMAGE_NT_HEADERS64)((PUCHAR)pImageFileBase + ((PIMAGE_DOS_HEADER)pImageFileBase)->e_lfanew);
 	pDataDirectory = pImagePeHdr->OptionalHeader.DataDirectory;
+	///Is it safe to read the data directory array until the desired entry?
 	maxReadSize = sizeof(IMAGE_DATA_DIRECTORY) * (IMAGE_DIRECTORY_ENTRY_EXPORT + 1);
 	status = validatePePointer(pImageFileBase, pDataDirectory, maxReadSize, TRUE);
 	if (status)
 		return status;
 
-	exportSize = pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
-	printf_s("\nexportSize: %lu, Export Directory RVA: %lu", exportSize, pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-	if (listBufferSize < PAGE_ROUND_UP(exportSize)){
-		*pNeededBufferSize = PAGE_ROUND_UP(exportSize);
-		return STATUS_BUFFER_TOO_SMALL;
-	}
-	
-	PIMAGE_EXPORT_DIRECTORY pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((PUCHAR)pImageFileBase + pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+	pExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((PUCHAR)pImageFileBase + pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+	///Is it safe to read all members of the export directory structure?
 	maxReadSize = sizeof(IMAGE_EXPORT_DIRECTORY);
 	status = validatePePointer(pImageFileBase, pExportDirectory, maxReadSize, FALSE);
 	if (status)
 		return status;
 
+	///Is the claimed export size viable?
+	exportSize = pDataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+	status = validatePePointer(pImageFileBase, pExportDirectory, exportSize, FALSE);
+	if (status)
+		return status;
+
+	///By doing some math one can prove that the maximum needed buffer size is guaranteed
+	///to not exceed the export directory size: Due to PE specifications the export size is going to be
+	///more than at least: all_namelengths + NumberOfNames * (sizeof(ANSI_NULL) + sizeof(ULONG)). 
+	///This simplifies to: all_namelengths + 5 * NumberOfNames.
+	///Since we will be adding one more char for each name entry, our actual needed buffer size becomes at maximum:
+	///all_namelengths + NumberOfNames * 2 * sizeof(char), which simplifies to all_namelengths + 2 * NumberOfNames.
+	///As we can see, there exists still a huge safety margin, even though we completely neglected
+	///the sizes of both the function RVA and the ordinal tables. It is therefore fully sufficient if we
+	///set the needed buffer size to the export size.
+	if (*pNeededBufferSize < PAGE_ROUND_UP(exportSize)){
+		*pNeededBufferSize = PAGE_ROUND_UP(exportSize);
+		return STATUS_BUFFER_TOO_SMALL;
+	}
+
+	///Is it safe to scan down the name RVA array?
 	pNameRvaArray = (PULONG)((PUCHAR)pImageFileBase + pExportDirectory->AddressOfNames);
-	maxReadSize = 7;
+	maxReadSize = pExportDirectory->NumberOfNames * sizeof(ULONG);
 	status = validatePePointer(pImageFileBase, pNameRvaArray, maxReadSize, FALSE);
 	if (status)
 		return status;
 
 	pListPointer = pListBuffer;
 	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
+		///Will none of the obtained name RVAs evaluate to an invalid name pointer?
+		if (!(exportSize + pDataDirectory->VirtualAddress > pNameRvaArray[i]))
+			return STATUS_INVALID_IMAGE_FORMAT;
+
 		pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[i];
-		///At the end of RVA array there isn't a next name entry anymore.
-		///There must be a terminating zero though, which we're going to exploit
+		///At the end of RVA array there is no longer a next name entry.
+		///There must by PE design a terminating zero though, which we're going to exploit
 		///in order to still have a valid name length.
 		if (pExportDirectory->NumberOfNames - 1 == i){
 			int j = 0;
@@ -198,7 +219,7 @@ void mymain(void){
 		mydie(status);
 
 	printf_s("DLL loaded successfully. Address: %p\n", pDllBase);
-	status = obtainImageFileEatEntries(pDllBase, NULL, 0, &requiredBufSize);
+	status = obtainImageFileEatEntries(pDllBase, NULL, &requiredBufSize);
 	if (status != STATUS_BUFFER_TOO_SMALL)
 		mydie(status);
 
@@ -206,14 +227,13 @@ void mymain(void){
 	if (status)
 		mydie(status);
 	
-	status = obtainImageFileEatEntries(pDllBase, pListBuf, requiredBufSize, &requiredBufSize);
+	status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize);
 	if (status)
 		mydie(status);
 
 	printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
 
-
-	dumpEatEntriesToFile(NULL, 0);
+	dumpEatEntriesToFile(pListBuf, requiredBufSize);
 	fflush(stdin);
 	_getch();
 }
