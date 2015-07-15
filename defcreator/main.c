@@ -92,14 +92,18 @@ NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG acce
 NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, ULONGLONG listBufferSize, PULONGLONG pNeededBufferSize){
 	IMAGE_DATA_DIRECTORY dataDirectory;
 
+	ULONG nameRvaCheck = 0;
+	ULONGLONG nameLength = 0;
 	ULONGLONG maxReadSize = 0;
 	NTSTATUS status = STATUS_UNABLE_TO_UNLOAD_MEDIA;
 	ULONGLONG exportSize = 0;
 	PIMAGE_NT_HEADERS64 pImagePeHdr = NULL;
 	PIMAGE_DATA_DIRECTORY pDataDirectory = NULL;
 	PULONG pNameRvaArray = NULL;
-	PUCHAR pExportName = NULL;
+	PUCHAR pCurrName = NULL;
+	PUCHAR pNextName = NULL;
 	PUCHAR pListPointer = NULL;
+
 	if (!pImageFileBase || !pNeededBufferSize || !pListBuffer && listBufferSize)
 		return STATUS_INVALID_PARAMETER;
 
@@ -124,39 +128,37 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, ULO
 		return status;
 
 	pNameRvaArray = (PULONG)((PUCHAR)pImageFileBase + pExportDirectory->AddressOfNames);
-	maxReadSize = sizeof(ULONGLONG);
-	status = validatePePointer(pImageFileBase, pExportDirectory, maxReadSize, FALSE);
+	maxReadSize = 7;
+	status = validatePePointer(pImageFileBase, pNameRvaArray, maxReadSize, FALSE);
 	if (status)
 		return status;
 
-	printf_s("\npAddressOfNames: %p", pNameRvaArray);
 	pListPointer = pListBuffer;
 	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
-		pExportName = (PUCHAR)pImageFileBase + pNameRvaArray[i];
-		ULONG j = 0;
-		while (pExportName[j]){
-			pListPointer[j] = pExportName[j];
-			j++;
+		pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[i];
+		///At the end of RVA array there isn't a next name entry anymore.
+		///There must be a terminating zero though, which we're going to exploit
+		///in order to still have a valid name length.
+		if (pExportDirectory->NumberOfNames - 1 == i){
+			int j = 0;
+			while (pCurrName[j])
+				j++;
+
+			nameLength = j;
 		}
-		*(PWCHAR)&pListPointer[j] = (WCHAR)0x0A0D;
-		pListPointer += j + sizeof(WCHAR);
+		else{
+			pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[i + 1];
+			nameLength = (ULONGLONG)(pNextName - pCurrName) - 1;
+		}
+		RtlCopyMemory(pListPointer, pCurrName, nameLength);
+		*(PWCHAR)&pListPointer[nameLength] = (WCHAR)0x0A0D;
+		pListPointer += nameLength + sizeof(WCHAR);
 	}
-	*pListPointer = 0x0;
-	printf_s("end of list: %p", pListPointer);
-	//printf_s("Exported funcs: \n%s", pListBuffer);
-	//pExportDirectory->AddressOfNames
-	//
 
-	//__try{
-	//	*pNeededBufferSize = 2332;
-	//}
-	//__except (EXCEPTION_EXECUTE_HANDLER){
-	//	printf_s("\nfail.");
-	//	return STATUS_ACCESS_VIOLATION;
-	//}
+	///Hit two birds with one stone by replacing last 0D 0A sequence with a terminating WCHAR 0.
+	*((PWCHAR)pListPointer - 1) = (WCHAR)0x0;
 
-	//printf_s("\nExportDirectory: %p", pExportDirectory);
-	//printf_s("\nImage exports %d named functions.", pExportDirectory->NumberOfNames);
+	*pNeededBufferSize = (ULONGLONG)(pListPointer - pListBuffer);
 	return STATUS_SUCCESS;
 }
 
@@ -207,6 +209,9 @@ void mymain(void){
 	status = obtainImageFileEatEntries(pDllBase, pListBuf, requiredBufSize, &requiredBufSize);
 	if (status)
 		mydie(status);
+
+	printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
+
 
 	dumpEatEntriesToFile(NULL, 0);
 	fflush(stdin);
