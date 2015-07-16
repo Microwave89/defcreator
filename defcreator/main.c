@@ -37,6 +37,15 @@ NTSTATUS myfgetws(__inout PWCHAR pInputBuffer, __in ULONGLONG inputBufferSize, _
 	return STATUS_SUCCESS;
 }
 
+int mycompare(const void* pElem1, const void* pElem2){
+	if (*(PULONG)pElem1 < *(PULONG)pElem2)
+		return -1;
+	else if (*(PULONG)pElem1 > *(PULONG)pElem2)
+		return 1;
+	else
+		return 0;
+}
+
 NTSTATUS getAndLoadDllByInput(PVOID* ppDllBase){
 	WCHAR szDllName[MAX_PATH];		///It's impossible, that the DLL's image name length exceeds 260 chars,
 									///since the maximum length of a file path part is limited to ~255 by Windows.
@@ -90,6 +99,7 @@ NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG acce
 }
 
 NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PULONGLONG pNeededBufferSize, PUCHAR pModuleName, ULONGLONG moduleNameSize){
+	UCHAR szError[] = "Error";
 	ULONGLONG nameLength = 0;
 	ULONGLONG maxReadSize = 0;
 	NTSTATUS status = STATUS_UNABLE_TO_UNLOAD_MEDIA;
@@ -97,7 +107,10 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	PIMAGE_NT_HEADERS64 pImagePeHdr = NULL;
 	PIMAGE_DATA_DIRECTORY pDataDirectory = NULL;
 	PIMAGE_EXPORT_DIRECTORY pExportDirectory = NULL;
+	PULONG piListBuffer = NULL;
 	PULONG pNameRvaArray = NULL;
+	PULONG pNameOrdinalRvaArray = NULL;
+	PUSHORT pCurrOrdinal = NULL;
 	PUCHAR pCurrName = NULL;
 	PUCHAR pNextName = NULL;
 	PUCHAR pListPointer = NULL;
@@ -150,6 +163,13 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	if (status)
 		return status;
 
+	///Is it safe to scan down the name ordinal RVA array?
+	pNameOrdinalRvaArray = (PULONG)((PUCHAR)pImageFileBase + pExportDirectory->AddressOfNameOrdinals);
+	maxReadSize = pExportDirectory->NumberOfNames * sizeof(ULONG);
+	status = validatePePointer(pImageFileBase, pNameOrdinalRvaArray, maxReadSize, FALSE);
+	if (status)
+		return status;
+
 	///Is it safe to copy the module name?
 	maxReadSize = pNameRvaArray[0] - pExportDirectory->Name;
 	status = validatePePointer(pImageFileBase, (PVOID)((PUCHAR)pImageFileBase + pExportDirectory->Name), maxReadSize, FALSE);
@@ -158,17 +178,89 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 
 	if (moduleNameSize < maxReadSize)
 		return STATUS_STACK_OVERFLOW;
-
 	RtlCopyMemory(pModuleName, (PUCHAR)pImageFileBase + pExportDirectory->Name, maxReadSize);
 	pModuleName[maxReadSize - 1] = 0x0;
-
 	pListPointer = pListBuffer;
-	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
+	printf_s("Allocated size: 0x%llX", *pNeededBufferSize);
+	printf_s("\npListBuffer: %p", pListBuffer);
+	printf_s("\nmodule name: %s", pModuleName);
+	//for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
+	//	currOrdinal = *(PUSHORT)((PUCHAR)pImageFileBase + pNameOrdinalRvaArray[i]);
+	//	///Will none of the obtained name RVAs evaluate to an invalid name pointer?
+	//	if (!(exportSize + pDataDirectory->VirtualAddress > pNameRvaArray[currOrdinal]))
+	//		return STATUS_INVALID_IMAGE_FORMAT;
+	//	//printf_s("\n",i);
+	//	pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[currOrdinal];
+	//	printf_s("\npCurrentName: %p", pCurrName);
+	//	///At the end of RVA array there is no longer a next name entry.
+	//	///There must by PE design a terminating zero though, which we're going to exploit
+	//	///in order to still have a valid name length.
+	//	if (pExportDirectory->NumberOfNames - 1 == i){
+	//		int j = 0;
+	//		while (pCurrName[j])
+	//			j++;
+
+	//		nameLength = j;
+	//	}
+	//	else{
+	//		pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[currOrdinal + 1];
+	//		nameLength = (ULONGLONG)(pNextName - pCurrName) - 1;
+	//	}
+	//	printf_s("\npListPointer: %p", pListPointer);
+	//	printf_s("\nname length: %llX", nameLength);
+	//	RtlCopyMemory(pListPointer, pCurrName, nameLength);
+	//	printf_s("\nuiziu%uzi",i);
+	//	*(PWCHAR)&pListPointer[nameLength] = (WCHAR)0x0A0D;
+	//	pListPointer += nameLength + sizeof(WCHAR);
+	//}
+	piListBuffer = (PULONG)(pListBuffer + *pNeededBufferSize - pExportDirectory->NumberOfNames * sizeof(ULONG));
+	RtlCopyMemory(piListBuffer, pNameRvaArray, pExportDirectory->NumberOfNames * sizeof(ULONG));
+	qsort(piListBuffer, (ULONGLONG)pExportDirectory->NumberOfNames, sizeof(ULONG), mycompare);
+	
+	//ULONG minRva = 0x0;
+	//
+	//for (ULONG j = 0; j < pExportDirectory->NumberOfNames; j++){
+	//	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
+	//		if (minRva > pNameRvaArray[i])
+	//			minRva = pNameRvaArray[i];
+	//	}
+	//	piListBuffer[j] = minRva;
+	//}
+
+	//LDR_DATA_TABLE_ENTRY
+
+	//for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
+	//	if (minRva > piListBuffer[i])
+	//		minRva = piListBuffer[i];
+	//}
+
+
+
+	for (ULONG i = 0; i < pExportDirectory->NumberOfNames -1; i++){
+		printf_s("\nRVA %lu: %lX", i, piListBuffer[i]);
+		nameLength = piListBuffer[i + 1] - piListBuffer[i];
+		printf_s("\nName length: %d", nameLength);
+	}
+	pNameRvaArray = piListBuffer;
+	ULONG numNames = pExportDirectory->NumberOfNames;
+	for (ULONG i = 0; i < numNames; i++){
+		//pCurrOrdinal = (PUSHORT)((PUCHAR)pImageFileBase + pNameOrdinalRvaArray[i]);
+		//printf_s("\npOrdinal: %p", pCurrOrdinal);
+		//maxReadSize = pExportDirectory->NumberOfNames * sizeof(USHORT);
+		//status = validatePePointer(pImageFileBase, pCurrOrdinal, maxReadSize, FALSE);
+		//if (status){
+		//	printf_s("\nOrdinal error.");
+		//	if (numNames < pExportDirectory->NumberOfFunctions)
+		//		numNames++;
+		//}
+		//else
+		//	printf_s("\nOrdinal: %u", *pCurrOrdinal);
 		///Will none of the obtained name RVAs evaluate to an invalid name pointer?
 		if (!(exportSize + pDataDirectory->VirtualAddress > pNameRvaArray[i]))
 			return STATUS_INVALID_IMAGE_FORMAT;
-
+		//printf_s("\n",i);
 		pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[i];
+		printf_s("\npCurrentName: %p", pCurrName);
 		///At the end of RVA array there is no longer a next name entry.
 		///There must by PE design a terminating zero though, which we're going to exploit
 		///in order to still have a valid name length.
@@ -180,14 +272,32 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 			nameLength = j;
 		}
 		else{
-			pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[i + 1];
-			nameLength = (ULONGLONG)(pNextName - pCurrName) - 1;
+			//pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[i + 1];
+			//if (pNextName <= pCurrName){
+			//	pCurrName = szError;
+			//	nameLength = sizeof(szError) - 1;
+			//}
+			//else {
+				nameLength = (ULONGLONG)(pNameRvaArray[i + 1] - pNameRvaArray[i]/*pNextName - pCurrName*/) - 1;
+			//}
 		}
+		printf_s("\npListPointer: %p", pListPointer);
+		printf_s("\nname length: %llX", nameLength);
+		if ((PUCHAR)piListBuffer <= pListPointer + nameLength + sizeof(WCHAR)){
+			pCurrName = szError;
+			nameLength = sizeof(szError) - 1;
+			pListPointer = (PUCHAR)piListBuffer - (nameLength + sizeof(WCHAR));
+		//	pListPointer = pListBuffer + *pNeededBufferSize - (ULONGLONG)piListBuffer - (nameLength + sizeof(WCHAR));
+			///Indirect break, bail out.
+			i = pExportDirectory->NumberOfNames;
+		}
+		
 		RtlCopyMemory(pListPointer, pCurrName, nameLength);
+		//printf_s("\nuiziu%uzi",i);
 		*(PWCHAR)&pListPointer[nameLength] = (WCHAR)0x0A0D;
 		pListPointer += nameLength + sizeof(WCHAR);
 	}
-
+	//printf_s("\nqqqqqqqqqqq");
 	///Hit two birds with one stone by replacing last 0D 0A sequence with a terminating WCHAR 0.
 	*((PWCHAR)pListPointer - 1) = (WCHAR)0x0;
 
@@ -249,6 +359,7 @@ void mymain(void){
 	ULONGLONG requiredBufSize = 0;
 	ULONGLONG entryStringLength = 0;
 	NTSTATUS status = STATUS_HANDLE_NO_LONGER_VALID;
+	go:
 
 	printf_s("Welcome to .def File Creator V0.1!\n\n");
 	printf_s("Enter the full DLL or exe name as in the following example:\n");
@@ -268,7 +379,7 @@ void mymain(void){
 	status = NtAllocateVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, 0, &requiredBufSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 	if (status)
 		mydie(status);
-	
+	ULONGLONG bufSize = requiredBufSize;
 	status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
 	if (status)
 		mydie(status);
@@ -278,7 +389,12 @@ void mymain(void){
 
 	///We don't want to write zeros into the file. The standard EOF is sufficient.
 	entryStringLength = requiredBufSize - sizeof(WCHAR);
-	dumpEatEntriesToDefFile(pListBuf, requiredBufSize, szInternalDllName);
+	dumpEatEntriesToDefFile(pListBuf, entryStringLength, szInternalDllName);
+
+	status = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, &bufSize, MEM_FREE);
+	if (status)
+		mydie(status);
 	fflush(stdin);
 	_getch();
+	goto go;
 }
