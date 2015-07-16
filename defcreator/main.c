@@ -102,6 +102,7 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	UCHAR szError[] = "Error";
 	ULONGLONG nameLength = 0;
 	ULONGLONG maxReadSize = 0;
+	ULONGLONG minExportSize = 0;
 	NTSTATUS status = STATUS_UNABLE_TO_UNLOAD_MEDIA;
 	ULONGLONG exportSize = 0;
 	PIMAGE_NT_HEADERS64 pImagePeHdr = NULL;
@@ -109,10 +110,7 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	PIMAGE_EXPORT_DIRECTORY pExportDirectory = NULL;
 	PULONG piListBuffer = NULL;
 	PULONG pNameRvaArray = NULL;
-	PULONG pNameOrdinalRvaArray = NULL;
-	PUSHORT pCurrOrdinal = NULL;
 	PUCHAR pCurrName = NULL;
-	PUCHAR pNextName = NULL;
 	PUCHAR pListPointer = NULL;
 
 	if (!pImageFileBase || !pNeededBufferSize || !pModuleName)
@@ -163,14 +161,26 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 	if (status)
 		return status;
 
-	///Is it safe to scan down the name ordinal RVA array?
-	pNameOrdinalRvaArray = (PULONG)((PUCHAR)pImageFileBase + pExportDirectory->AddressOfNameOrdinals);
-	maxReadSize = pExportDirectory->NumberOfNames * sizeof(ULONG);
-	status = validatePePointer(pImageFileBase, pNameOrdinalRvaArray, maxReadSize, FALSE);
-	if (status)
-		return status;
+	///Since NumberOfNames can be any value, we need to roughly estimate the exportSize
+	///according to the combined sizes of the three export describing arrays.
+	///If this yields to greater export size than the claimed export size, the image must be rejected.
+	minExportSize = sizeof(ULONG) * pExportDirectory->NumberOfFunctions + pExportDirectory->NumberOfNames * sizeof(ULONG) + sizeof(USHORT) + sizeof(ANSI_NULL);
+	if (exportSize <= minExportSize)
+		return STATUS_INVALID_IMAGE_FORMAT;
 
-	///Is it safe to copy the module name?
+	///It is NOT guaranteed, that an entry in the name RVA array at position 'n' has a value
+	///which also orders as the n-th element in the entire name RVA range.
+	///It is therefore not permissible to calculate the name length by simply doing
+	///pNameRvaArray[n+1] - pNameRvaArray[n]. If we still want to make this assumption
+	///the RVAs values must be sorted until they are in an ascending order.
+	///By utilizing the last unused bytes of the caller-allocated buffer we avoid having
+	///to allocate a buffer on our own. Doing the math above (see exportsize calculation)
+	///one can prove that the safety margin is sufficient if we use the buffer in that way.
+	piListBuffer = (PULONG)(pListBuffer + *pNeededBufferSize - pExportDirectory->NumberOfNames * sizeof(ULONG));
+	RtlCopyMemory(piListBuffer, pNameRvaArray, pExportDirectory->NumberOfNames * sizeof(ULONG));
+	qsort(piListBuffer, (ULONGLONG)pExportDirectory->NumberOfNames, sizeof(ULONG), mycompare);
+
+	///Is it safe to read the module name?
 	maxReadSize = pNameRvaArray[0] - pExportDirectory->Name;
 	status = validatePePointer(pImageFileBase, (PVOID)((PUCHAR)pImageFileBase + pExportDirectory->Name), maxReadSize, FALSE);
 	if (status)
@@ -178,89 +188,19 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 
 	if (moduleNameSize < maxReadSize)
 		return STATUS_STACK_OVERFLOW;
+	
 	RtlCopyMemory(pModuleName, (PUCHAR)pImageFileBase + pExportDirectory->Name, maxReadSize);
 	pModuleName[maxReadSize - 1] = 0x0;
 	pListPointer = pListBuffer;
-	printf_s("Allocated size: 0x%llX", *pNeededBufferSize);
-	printf_s("\npListBuffer: %p", pListBuffer);
 	printf_s("\nmodule name: %s", pModuleName);
-	//for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
-	//	currOrdinal = *(PUSHORT)((PUCHAR)pImageFileBase + pNameOrdinalRvaArray[i]);
-	//	///Will none of the obtained name RVAs evaluate to an invalid name pointer?
-	//	if (!(exportSize + pDataDirectory->VirtualAddress > pNameRvaArray[currOrdinal]))
-	//		return STATUS_INVALID_IMAGE_FORMAT;
-	//	//printf_s("\n",i);
-	//	pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[currOrdinal];
-	//	printf_s("\npCurrentName: %p", pCurrName);
-	//	///At the end of RVA array there is no longer a next name entry.
-	//	///There must by PE design a terminating zero though, which we're going to exploit
-	//	///in order to still have a valid name length.
-	//	if (pExportDirectory->NumberOfNames - 1 == i){
-	//		int j = 0;
-	//		while (pCurrName[j])
-	//			j++;
 
-	//		nameLength = j;
-	//	}
-	//	else{
-	//		pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[currOrdinal + 1];
-	//		nameLength = (ULONGLONG)(pNextName - pCurrName) - 1;
-	//	}
-	//	printf_s("\npListPointer: %p", pListPointer);
-	//	printf_s("\nname length: %llX", nameLength);
-	//	RtlCopyMemory(pListPointer, pCurrName, nameLength);
-	//	printf_s("\nuiziu%uzi",i);
-	//	*(PWCHAR)&pListPointer[nameLength] = (WCHAR)0x0A0D;
-	//	pListPointer += nameLength + sizeof(WCHAR);
-	//}
-	piListBuffer = (PULONG)(pListBuffer + *pNeededBufferSize - pExportDirectory->NumberOfNames * sizeof(ULONG));
-	RtlCopyMemory(piListBuffer, pNameRvaArray, pExportDirectory->NumberOfNames * sizeof(ULONG));
-	qsort(piListBuffer, (ULONGLONG)pExportDirectory->NumberOfNames, sizeof(ULONG), mycompare);
-	
-	//ULONG minRva = 0x0;
-	//
-	//for (ULONG j = 0; j < pExportDirectory->NumberOfNames; j++){
-	//	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
-	//		if (minRva > pNameRvaArray[i])
-	//			minRva = pNameRvaArray[i];
-	//	}
-	//	piListBuffer[j] = minRva;
-	//}
-
-	//LDR_DATA_TABLE_ENTRY
-
-	//for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
-	//	if (minRva > piListBuffer[i])
-	//		minRva = piListBuffer[i];
-	//}
-
-
-
-	for (ULONG i = 0; i < pExportDirectory->NumberOfNames -1; i++){
-		printf_s("\nRVA %lu: %lX", i, piListBuffer[i]);
-		nameLength = piListBuffer[i + 1] - piListBuffer[i];
-		printf_s("\nName length: %d", nameLength);
-	}
 	pNameRvaArray = piListBuffer;
-	ULONG numNames = pExportDirectory->NumberOfNames;
-	for (ULONG i = 0; i < numNames; i++){
-		//pCurrOrdinal = (PUSHORT)((PUCHAR)pImageFileBase + pNameOrdinalRvaArray[i]);
-		//printf_s("\npOrdinal: %p", pCurrOrdinal);
-		//maxReadSize = pExportDirectory->NumberOfNames * sizeof(USHORT);
-		//status = validatePePointer(pImageFileBase, pCurrOrdinal, maxReadSize, FALSE);
-		//if (status){
-		//	printf_s("\nOrdinal error.");
-		//	if (numNames < pExportDirectory->NumberOfFunctions)
-		//		numNames++;
-		//}
-		//else
-		//	printf_s("\nOrdinal: %u", *pCurrOrdinal);
+	for (ULONG i = 0; i < pExportDirectory->NumberOfNames; i++){
 		///Will none of the obtained name RVAs evaluate to an invalid name pointer?
 		if (!(exportSize + pDataDirectory->VirtualAddress > pNameRvaArray[i]))
 			return STATUS_INVALID_IMAGE_FORMAT;
-		//printf_s("\n",i);
+		
 		pCurrName = (PUCHAR)pImageFileBase + pNameRvaArray[i];
-		printf_s("\npCurrentName: %p", pCurrName);
 		///At the end of RVA array there is no longer a next name entry.
 		///There must by PE design a terminating zero though, which we're going to exploit
 		///in order to still have a valid name length.
@@ -272,32 +212,25 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 			nameLength = j;
 		}
 		else{
-			//pNextName = (PUCHAR)pImageFileBase + pNameRvaArray[i + 1];
-			//if (pNextName <= pCurrName){
-			//	pCurrName = szError;
-			//	nameLength = sizeof(szError) - 1;
-			//}
-			//else {
-				nameLength = (ULONGLONG)(pNameRvaArray[i + 1] - pNameRvaArray[i]/*pNextName - pCurrName*/) - 1;
-			//}
+			nameLength = (ULONGLONG)(pNameRvaArray[i + 1] - pNameRvaArray[i]/*pNextName - pCurrName*/) - 1;
 		}
-		printf_s("\npListPointer: %p", pListPointer);
-		printf_s("\nname length: %llX", nameLength);
+		///If for some reason the allocated buffer is about to be overran
+		///we print an error signature into the buffer and abort the scan.
+		///In regard of our thousands of sanity checks this surely denotes a major PE damage.
+		///Additionally, we break a little earlier to not have the failure overwrite the sorted RVAs.
 		if ((PUCHAR)piListBuffer <= pListPointer + nameLength + sizeof(WCHAR)){
 			pCurrName = szError;
 			nameLength = sizeof(szError) - 1;
 			pListPointer = (PUCHAR)piListBuffer - (nameLength + sizeof(WCHAR));
-		//	pListPointer = pListBuffer + *pNeededBufferSize - (ULONGLONG)piListBuffer - (nameLength + sizeof(WCHAR));
 			///Indirect break, bail out.
 			i = pExportDirectory->NumberOfNames;
 		}
 		
 		RtlCopyMemory(pListPointer, pCurrName, nameLength);
-		//printf_s("\nuiziu%uzi",i);
 		*(PWCHAR)&pListPointer[nameLength] = (WCHAR)0x0A0D;
 		pListPointer += nameLength + sizeof(WCHAR);
 	}
-	//printf_s("\nqqqqqqqqqqq");
+	
 	///Hit two birds with one stone by replacing last 0D 0A sequence with a terminating WCHAR 0.
 	*((PWCHAR)pListPointer - 1) = (WCHAR)0x0;
 
@@ -359,7 +292,6 @@ void mymain(void){
 	ULONGLONG requiredBufSize = 0;
 	ULONGLONG entryStringLength = 0;
 	NTSTATUS status = STATUS_HANDLE_NO_LONGER_VALID;
-	go:
 
 	printf_s("Welcome to .def File Creator V0.1!\n\n");
 	printf_s("Enter the full DLL or exe name as in the following example:\n");
@@ -396,5 +328,4 @@ void mymain(void){
 		mydie(status);
 	fflush(stdin);
 	_getch();
-	goto go;
 }

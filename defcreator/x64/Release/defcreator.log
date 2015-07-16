@@ -1,10 +1,8 @@
-﻿Build started 16.07.2015 20:12:01.
+﻿Build started 17.07.2015 01:38:38.
      1>Project "E:\Users\MicrowaveStd\Documents\Visual Studio 2013\Projects\um\defcreator\defcreator\defcreator.vcxproj" on node 2 (Rebuild target(s)).
      1>ClCompile:
          E:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin\x86_amd64\CL.exe /c /nologo /W4 /WX- /O1 /Ob0 /Os /Oy /GL /D WIN32 /D NDEBUG /D _WINDOWS /Gm- /GS- /Gy /fp:precise /fp:except- /Zc:wchar_t /Zc:forScope /GR- /Fo"x64\Release\\" /Fd"x64\Release\vc120.pdb" /Gd /TC /Zl /errorReport:prompt main.c
          main.c
-     1>main.c(115): warning C4189: 'pNextName' : local variable is initialized but not referenced
-     1>main.c(113): warning C4189: 'pCurrOrdinal' : local variable is initialized but not referenced
        Link:
          E:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin\x86_amd64\link.exe /ERRORREPORT:PROMPT /OUT:"E:\Users\MicrowaveStd\Documents\Visual Studio 2013\Projects\um\defcreator\x64\Release\defcreator.exe" /VERSION:"6.1" /INCREMENTAL:NO /NOLOGO kernel32.lib ntdllp.lib "E:\Users\MicrowaveStd\Documents\Visual Studio 2013\Projects\um\defcreator\defcreator\mymsvcrt.lib" /NODEFAULTLIB /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /PDB:"E:\Users\MicrowaveStd\Documents\Visual Studio 2013\Projects\um\defcreator\x64\Release\defcreator.pdb" /SUBSYSTEM:CONSOLE /LARGEADDRESSAWARE /OPT:REF /OPT:ICF /LTCG /TLBID:1 /ENTRY:"mymain" /DYNAMICBASE /FIXED:NO /NXCOMPAT /IMPLIB:"E:\Users\MicrowaveStd\Documents\Visual Studio 2013\Projects\um\defcreator\x64\Release\defcreator.lib" /MACHINE:X64 /SAFESEH:NO x64\Release\main.obj
          Generating code
@@ -14,4 +12,4 @@
 
 Build succeeded.
 
-Time Elapsed 00:00:03.09
+Time Elapsed 00:00:02.02
