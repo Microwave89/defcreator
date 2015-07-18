@@ -3,6 +3,7 @@
 
 static WCHAR sg_szDefFile[MAXSHORT + 1];
 
+
 void mydie(NTSTATUS status, NTSTATUS fatalStatus){
 	printf_s("\nAn error occurred. NTSTATUS: %lX", status);
 	if (fatalStatus){
@@ -360,11 +361,13 @@ void mymain(void){
 
 		///We don't want to write zeros into the file. The standard EOF is sufficient.
 		entryStringLength = requiredBufSize - sizeof(WCHAR);
-		dumpEatEntriesToDefFile(pListBuf, entryStringLength, szInternalDllName);
+		status = dumpEatEntriesToDefFile(pListBuf, entryStringLength, szInternalDllName);
 
 		fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, &bufSize, MEM_RELEASE);
-		if (fatalStatus)
+		if (status || fatalStatus){
 			mydie(status, fatalStatus);
+			continue;
+		}
 
 		printf_s("\nThe image has been successfully scanned and its exports were");
 		printf_s("\ndumped into \"exports.def\" successfully.");
