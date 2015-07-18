@@ -3,11 +3,17 @@
 
 static WCHAR sg_szDefFile[MAXSHORT + 1];
 
-void mydie(NTSTATUS status){
-	printf_s("\nNTSTATUS error: 0x%lX", status);
+void mydie(NTSTATUS status, NTSTATUS fatalStatus){
+	printf_s("\nAn error occurred. NTSTATUS: %lX", status);
+	if (fatalStatus){
+		printf_s("\nWhile handling this error, a fatal error occurred.");
+		printf_s("\nProgram termination due to NTSTATUS 0x%lX.", fatalStatus);
+		fflush(stdin);
+		_getch();
+		NtTerminateProcess(INVALID_HANDLE_VALUE, status);
+	}
 	fflush(stdin);
 	_getch();
-	NtTerminateProcess(INVALID_HANDLE_VALUE, status);
 }
 
 NTSTATUS myfgetws(__inout PWCHAR pInputBuffer, __in ULONGLONG inputBufferSize, __out PULONGLONG pStrSize){
@@ -57,7 +63,7 @@ NTSTATUS getAndLoadDllByInput(PVOID* ppDllBase){
 
 	status = myfgetws(szDllName, sizeof(szDllName), &dllStrSize);
 	if (status)
-		mydie(status);
+		return status;
 
 	///Although we don't want any DllMain() to be called, we intend to use standard PE math
 	///when walking the EAT at a later time. So we still need to load the DLL as an image file.	
@@ -67,10 +73,8 @@ NTSTATUS getAndLoadDllByInput(PVOID* ppDllBase){
 
 	RtlInitUnicodeString(&uDllName, szDllName);
 	status = LdrLoadDll(NULL, &loadFlags, &uDllName, ppDllBase);
-	if (status)
-		mydie(status);
 
-	return STATUS_SUCCESS;
+	return status;
 }
 
 NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG accessLength, BOOLEAN isNewImage){
@@ -89,7 +93,6 @@ NTSTATUS validatePePointer(PVOID pImageBase, PVOID pArbitraryPtr, ULONGLONG acce
 	}
 
 	///The viability of this pointer validation is based on three assumptions:
-	///0. The amount of data read is at maximum 8 bytes!!!!
 	///1. Each mapped section of the image is at least readable (R) without guard (+G).
 	///2. There don't exist any free pages between two sections of the same image.
 	if ((pImageBase < ALIGN_DOWN_POINTER(pArbitraryPtr, PVOID)) && (((PUCHAR)ALIGN_UP_POINTER(pArbitraryPtr, PVOID) + accessLength) < ((PUCHAR)pImageBase + peSize)))
@@ -118,7 +121,7 @@ NTSTATUS obtainImageFileEatEntries(PVOID pImageFileBase, PUCHAR pListBuffer, PUL
 
 	if (!pListBuffer && *pNeededBufferSize)
 		return STATUS_INVALID_PARAMETER;
-	
+
 	pImagePeHdr = (PIMAGE_NT_HEADERS64)((PUCHAR)pImageFileBase + ((PIMAGE_DOS_HEADER)pImageFileBase)->e_lfanew);
 	pDataDirectory = pImagePeHdr->OptionalHeader.DataDirectory;
 	///Is it safe to read the data directory array until the desired entry?
@@ -243,7 +246,8 @@ NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize, 
 	UNICODE_STRING uDefFileName;
 	IO_STATUS_BLOCK ioSb;
 
-	NTSTATUS status = STATUS_CLUSTER_NETINTERFACE_EXISTS;
+	NTSTATUS status, fatalStatus = STATUS_CLUSTER_NETINTERFACE_EXISTS;
+	
 	PCHAR pDefPreamble = NULL;
 	///Keep it simple. We can't allocate less than 4 kB using NtXxx funcs anyway,
 	///so just allocate 4 kB although we never will need that much.
@@ -251,37 +255,55 @@ NTSTATUS dumpEatEntriesToDefFile(PVOID pEatEntryList, ULONGLONG listBufferSize, 
 	HANDLE hDefFile = NULL;
 	HANDLE hParentDir = NULL;
 	///Quite some ugly hacking...
-	char szDefPreamblePart[] = { 0x0D, 0x0A, 0x0D, 0x0A, 'E', 'X', 'P', 'O', 'R', 'T', 'S', 0x0D, 0x0A };
+	char szDefPreamblePart[] = { 0x0D, 0x0A, 0x0D, 0x0A, 'E', 'X', 'P', 'O', 'R', 'T', 'S', 0x0D, 0x0A, 0x0 };
 
 	status = NtAllocateVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, 0, &defPreambleSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 	if (status)
 		return status;
 
 	status = RtlStringCbPrintfA(pDefPreamble, defPreambleSize, "LIBRARY %s%s", pModuleName, szDefPreamblePart);
-	if (status)
+	if (status){
+		fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, &defPreambleSize, MEM_RELEASE);
+		if (fatalStatus)
+			mydie(status, fatalStatus);
+
 		return status;
+	}
 
 	status = RtlStringCbLengthA(pDefPreamble, defPreambleSize, &defPreambleSize);
-	if (status)
+	if (status){
+		fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, &defPreambleSize, MEM_RELEASE);
+		if (fatalStatus)
+			mydie(status, fatalStatus);
+
 		return status;
+	}
 
 	hParentDir = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
 	RtlInitUnicodeString(&uDefFileName, L"exports.def");
 	InitializeObjectAttributes(&defFileAttr, &uDefFileName, OBJ_CASE_INSENSITIVE, hParentDir, NULL);
 	status = NtCreateFile(&hDefFile, FILE_ALL_ACCESS | SYNCHRONIZE, &defFileAttr, &ioSb, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SUPERSEDE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
-	if (status)
+	if (status){
+		fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, &defPreambleSize, MEM_RELEASE);
+		if (fatalStatus)
+			mydie(status, fatalStatus);
+
 		return status;
+	}
 
 	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, pDefPreamble, (ULONG)defPreambleSize, NULL, NULL);
-	if (status)
-		return status;
+	if (!status)
+		status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, pEatEntryList, (ULONG)listBufferSize, NULL, NULL);
 
-	status = NtWriteFile(hDefFile, NULL, NULL, NULL, &ioSb, pEatEntryList, (ULONG)listBufferSize, NULL, NULL);
-	if (status)
-		return status;
+	fatalStatus = NtClose(hDefFile);
+	if (fatalStatus)
+		mydie(status, fatalStatus);
 
-	NtClose(hDefFile);
-	return STATUS_SUCCESS;
+	fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pDefPreamble, &defPreambleSize, MEM_RELEASE);
+	if (fatalStatus)
+		mydie(status, fatalStatus);
+
+	return status;
 }
 
 void mymain(void){
@@ -290,42 +312,64 @@ void mymain(void){
 	PVOID pDllBase = NULL;
 	PVOID pListBuf = NULL;
 	ULONGLONG requiredBufSize = 0;
+	ULONGLONG bufSize = 0;
 	ULONGLONG entryStringLength = 0;
-	NTSTATUS status = STATUS_HANDLE_NO_LONGER_VALID;
+	NTSTATUS status, fatalStatus = STATUS_HANDLE_NO_LONGER_VALID;
 
-	printf_s("Welcome to .def File Creator V0.1!\n\n");
-	printf_s("Enter the full DLL or exe name as in the following example:\n");
-	printf_s("\"ntdll.dll\" (without quotes).\n\n");
-	printf_s("DLL must reside in \\System32 or in current directory.\n\n");
-	printf_s("DLL name: ");
+	for (;;){
+		pDllBase = NULL;
+		pListBuf = NULL;
+		requiredBufSize = 0;
+		bufSize = 0;
+		entryStringLength = 0;
 
-	status = getAndLoadDllByInput(&pDllBase);
-	if (status)
-		mydie(status);
+		system("CLS");
+		printf_s("Welcome to .def File Creator V0.1!\n\n");
+		printf_s("Enter the full DLL or exe name as in the following example:\n");
+		printf_s("\"ntdll.dll\" (without quotes).\n\n");
+		printf_s("DLL must reside in \\System32 or in current directory.\n\n");
+		printf_s("DLL name: ");
 
-	printf_s("DLL loaded successfully. Address: %p\n", pDllBase);
-	status = obtainImageFileEatEntries(pDllBase, NULL, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
-	if (status != STATUS_BUFFER_TOO_SMALL)
-		mydie(status);
+		status = getAndLoadDllByInput(&pDllBase);
+		if (status){
+			mydie(status, STATUS_SUCCESS);
+			continue;
+		}
+		
+		printf_s("DLL loaded successfully. Address: %p\n", pDllBase);
+		status = obtainImageFileEatEntries(pDllBase, NULL, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
+		if (status != STATUS_BUFFER_TOO_SMALL){
+			mydie(status, STATUS_SUCCESS);
+			continue;
+		}
+		
+		status = NtAllocateVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, 0, &requiredBufSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+		if (status){
+			mydie(status, STATUS_SUCCESS);
+			continue;
+		}
 
-	status = NtAllocateVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, 0, &requiredBufSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-	if (status)
-		mydie(status);
-	ULONGLONG bufSize = requiredBufSize;
-	status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
-	if (status)
-		mydie(status);
+		bufSize = requiredBufSize;
+		status = obtainImageFileEatEntries(pDllBase, pListBuf, &requiredBufSize, szInternalDllName, sizeof(szInternalDllName));
+		if (status){
+			mydie(status, STATUS_SUCCESS);
+			continue;
+		}
 
-	printf_s("\nDLL name: %s", szInternalDllName);
-	printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
+		printf_s("\n%s\n\nlist size: 0x%llX", pListBuf, requiredBufSize);
 
-	///We don't want to write zeros into the file. The standard EOF is sufficient.
-	entryStringLength = requiredBufSize - sizeof(WCHAR);
-	dumpEatEntriesToDefFile(pListBuf, entryStringLength, szInternalDllName);
+		///We don't want to write zeros into the file. The standard EOF is sufficient.
+		entryStringLength = requiredBufSize - sizeof(WCHAR);
+		dumpEatEntriesToDefFile(pListBuf, entryStringLength, szInternalDllName);
 
-	status = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, &bufSize, MEM_FREE);
-	if (status)
-		mydie(status);
-	fflush(stdin);
-	_getch();
+		fatalStatus = NtFreeVirtualMemory(INVALID_HANDLE_VALUE, &pListBuf, &bufSize, MEM_RELEASE);
+		if (fatalStatus)
+			mydie(status, fatalStatus);
+
+		printf_s("\nThe image has been successfully scanned and its exports were");
+		printf_s("\ndumped into \"exports.def\" successfully.");
+		printf_s("\n\nYou can press any key to dump another module or close the window to exit.");
+		fflush(stdin);
+		_getch();
+	}
 }
